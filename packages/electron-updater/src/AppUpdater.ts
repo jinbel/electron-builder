@@ -11,12 +11,38 @@ import { eq as isVersionsEqual, gt as isVersionGreaterThan, lt as isVersionLessT
 import { AppAdapter } from "./AppAdapter"
 import { createTempUpdateFile, DownloadedUpdateHelper } from "./DownloadedUpdateHelper"
 import { ElectronAppAdapter } from "./ElectronAppAdapter"
-import { ElectronHttpExecutor, getNetSession } from "./electronHttpExecutor"
 import { GenericProvider } from "./providers/GenericProvider"
 import { DOWNLOAD_PROGRESS, Logger, Provider, ResolvedUpdateFileInfo, UPDATE_DOWNLOADED, UpdateCheckResult, UpdateDownloadedEvent, UpdaterSignal } from "./main"
 import { createClient, isUrlProbablySupportMultiRangeRequests } from "./providerFactory"
 import { ProviderPlatform } from "./providers/Provider"
-import Session = Electron.Session
+import { NodeHttpExecutor } from "./nodeHttpExecutor"
+
+async function wait(timeInMilliseconds: number) {
+  return new Promise(resolve => {
+    setTimeout(() => {
+      resolve(undefined)
+    }, timeInMilliseconds)
+  });
+}
+
+async function renameGraceful(tempUpdateFile: string, updateFile: string) {
+  const maxRetryTimes = 3
+  async function doRename(retryCounter: number) {
+    try {
+      await rename(tempUpdateFile, updateFile);
+    } catch (e: any) {
+      if (e.code === "EBUSY" && retryCounter > 1) {
+        await wait(3000)
+        await doRename(retryCounter - 1)
+      } else {
+        e.message = `Rename Graceful: ${e.message}` 
+        throw e
+      }
+    }
+  }
+   
+  await doRename(maxRetryTimes)
+}
 
 export abstract class AppUpdater extends EventEmitter {
   /**
@@ -103,9 +129,10 @@ export abstract class AppUpdater extends EventEmitter {
   protected _logger: Logger = console
 
   // noinspection JSMethodCanBeStatic,JSUnusedGlobalSymbols
-  get netSession(): Session {
-    return getNetSession()
-  }
+  // cant get net session any more
+  // get netSession(): Session {
+  //   return getNetSession()
+  // }
 
   /**
    * The logger. You can pass [electron-log](https://github.com/megahertz/electron-log), [winston](https://github.com/winstonjs/winston) or another logger with the following interface: `{ info(), warn(), error() }`.
@@ -153,7 +180,7 @@ export abstract class AppUpdater extends EventEmitter {
   protected updateInfoAndProvider: UpdateInfoAndProvider | null = null
 
   /** @internal */
-  readonly httpExecutor: ElectronHttpExecutor
+  readonly httpExecutor: NodeHttpExecutor
 
   protected constructor(options: AllPublishOptions | null | undefined, app?: AppAdapter) {
     super()
@@ -164,7 +191,7 @@ export abstract class AppUpdater extends EventEmitter {
 
     if (app == null) {
       this.app = new ElectronAppAdapter()
-      this.httpExecutor = new ElectronHttpExecutor((authInfo, callback) => this.emit("login", authInfo, callback))
+      this.httpExecutor = new NodeHttpExecutor()
     } else {
       this.app = app
       this.httpExecutor = null as any
@@ -624,7 +651,7 @@ export abstract class AppUpdater extends EventEmitter {
     const tempUpdateFile = await createTempUpdateFile(`temp-${updateFileName}`, cacheDir, log)
     try {
       await taskOptions.task(tempUpdateFile, downloadOptions, packageFile, removeFileIfAny)
-      await rename(tempUpdateFile, updateFile)
+      await renameGraceful(tempUpdateFile, updateFile)
     } catch (e) {
       await removeFileIfAny()
 
